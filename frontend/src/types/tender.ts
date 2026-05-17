@@ -15,6 +15,7 @@ export interface Tender {
   purpose: string | null;
   conditions: string | null;
   location: string | null;
+  quantity: string | null;
   details_url: string | null;
   is_relevant: boolean | null;
   relevance_score: number | null;
