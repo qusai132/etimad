@@ -36,7 +36,8 @@ function RelevanceBadge({ score, isRelevant }: { score: number | null; isRelevan
 }
 
 export function TenderTable({ data, total, page, pages, onPageChange, onRowClick }: Props) {
-  const columns = useMemo<ColumnDef<Tender, unknown>[]>(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const columns = useMemo<ColumnDef<Tender, any>[]>(
     () => [
       col.accessor("reference_number", {
         header: "الرقم المرجعي",
