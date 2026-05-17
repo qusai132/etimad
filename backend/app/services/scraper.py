@@ -106,45 +106,99 @@ class EtimadScraper:
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     async def _get_total_pages(self, page: Page) -> int:
-        await page.goto(TENDER_LIST_URL, wait_until="networkidle")
-        await page.wait_for_selector(".pagination, ul.pagination, [class*='pag']", timeout=15000)
+        url = f"{TENDER_LIST_URL}?PageSize=50"
+        await page.goto(url, wait_until="networkidle")
+        await page.wait_for_timeout(3000)
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await page.wait_for_timeout(2000)
         content = await page.content()
         soup = BeautifulSoup(content, "lxml")
 
         last_page = 1
-        pagination = soup.select(".pagination li a, ul.pagination li a")
-        for a in pagination:
+
+        # Strategy 1: look for PageNumber in any anchor href
+        for a in soup.select("a[href]"):
             href = a.get("href", "")
-            m = re.search(r"PageNumber=(\d+)", href)
+            m = re.search(r"[Pp]age[Nn]umber=(\d+)", href)
             if m:
                 last_page = max(last_page, int(m.group(1)))
-            text = a.get_text(strip=True)
+
+        # Strategy 2: digit-only text in pagination elements
+        for el in soup.select("li a, li button, .pagination *, [class*='page'] *"):
+            text = el.get_text(strip=True)
             if text.isdigit():
                 last_page = max(last_page, int(text))
+
+        # Strategy 3: look for "من X صفحة" / "of X pages" text in the page
+        page_text = soup.get_text()
+        for pattern in [r"من\s+(\d+)\s+صفح", r"of\s+(\d+)\s+page", r"Page\s+\d+\s+of\s+(\d+)"]:
+            m = re.search(pattern, page_text, re.IGNORECASE)
+            if m:
+                last_page = max(last_page, int(m.group(1)))
+
+        # Strategy 4: try navigating to a high page number to find the ceiling
+        if last_page == 1:
+            for probe in [999, 100, 50, 20, 10, 5]:
+                probe_url = f"{TENDER_LIST_URL}?PageNumber={probe}&PageSize=50"
+                await page.goto(probe_url, wait_until="networkidle")
+                await page.wait_for_timeout(2000)
+                probe_content = await page.content()
+                probe_soup = BeautifulSoup(probe_content, "lxml")
+                # Check if the page has tender links (not empty/redirect)
+                probe_links = [
+                    a["href"] for a in probe_soup.select("a[href]")
+                    if any(p in a.get("href", "") for p in ["/Tender/Details/", "/Tender/OpenTenderDetails/", "TenderId="])
+                ]
+                if probe_links:
+                    last_page = probe
+                    break
 
         logger.info("total_pages_found", pages=last_page)
         return last_page
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     async def _get_tender_links_from_page(self, page: Page, page_number: int) -> list[str]:
-        url = f"{TENDER_LIST_URL}?PageNumber={page_number}"
+        url = f"{TENDER_LIST_URL}?PageNumber={page_number}&PageSize=50"
         await page.goto(url, wait_until="networkidle")
-        await page.wait_for_selector("table tbody tr, .tender-list, [class*='tender']", timeout=15000)
+        await page.wait_for_timeout(3000)
+        # Scroll to trigger any lazy-loaded content
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await page.wait_for_timeout(2000)
         content = await page.content()
         soup = BeautifulSoup(content, "lxml")
 
         links = set()
         for a in soup.select("a[href]"):
-            href = a["href"]
-            if "/Tender/Details/" in href or "/Tender/OpenTenderDetails/" in href:
+            href = a.get("href", "")
+            if not href or href.startswith("#") or href.startswith("javascript"):
+                continue
+            # Match any href that looks like a tender detail URL
+            if any(pat in href for pat in [
+                "/Tender/Details/",
+                "/Tender/OpenTenderDetails/",
+                "/Tender/TenderDetails/",
+                "TenderId=",
+                "tenderId=",
+                "tender_id=",
+            ]):
                 full_url = href if href.startswith("http") else f"{BASE_URL}{href}"
+                # Strip anchors/fragments
+                full_url = full_url.split("#")[0]
                 links.add(full_url)
 
-        for a in soup.select("a[href]"):
-            href = a["href"]
-            if "TenderId=" in href or "tenderId=" in href:
-                full_url = href if href.startswith("http") else f"{BASE_URL}{href}"
-                links.add(full_url)
+        # Also try JS-rendered hrefs via evaluate
+        try:
+            js_hrefs: list[str] = await page.evaluate("""
+                () => Array.from(document.querySelectorAll('a[href]'))
+                    .map(a => a.href)
+                    .filter(h => h.includes('/Tender/Details/') ||
+                                 h.includes('/Tender/OpenTenderDetails/') ||
+                                 h.includes('TenderId='))
+            """)
+            for href in js_hrefs:
+                links.add(href.split("#")[0])
+        except Exception:
+            pass
 
         logger.info("links_found_on_page", page=page_number, count=len(links))
         return list(links)
