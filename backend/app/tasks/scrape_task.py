@@ -13,6 +13,8 @@ from app.services.tender_service import (
     get_unmatched_tenders,
     mark_notification_sent,
     get_relevant_unnotified,
+    get_all_reference_numbers,
+    count_tenders,
 )
 from app.schemas.tender import TenderCreate
 
@@ -31,6 +33,18 @@ async def run_scrape_job() -> dict:
     pages_scraped = 0
     error_msg = None
 
+    # Decide full vs incremental scrape
+    async with AsyncSessionLocal() as db:
+        existing_count = await count_tenders(db)
+        if existing_count > 0:
+            known_refs = await get_all_reference_numbers(db)
+            is_incremental = True
+            logger.info("scrape_mode_incremental", existing=existing_count)
+        else:
+            known_refs = set()
+            is_incremental = False
+            logger.info("scrape_mode_full")
+
     try:
         scraper = EtimadScraper()
         tender_data_list: list[TenderCreate] = []
@@ -38,7 +52,10 @@ async def run_scrape_job() -> dict:
         async def collect(tender: TenderCreate):
             tender_data_list.append(tender)
 
-        scraped = await scraper.scrape_all(on_tender_scraped=collect)
+        if is_incremental:
+            scraped = await scraper.scrape_incremental(known_refs, on_tender_scraped=collect)
+        else:
+            scraped = await scraper.scrape_all(on_tender_scraped=collect)
         tenders_found = len(scraped)
 
         async with AsyncSessionLocal() as db:

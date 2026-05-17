@@ -117,6 +117,16 @@ async def finish_scrape_job(
     job.error_message = error_message
 
 
+async def get_all_reference_numbers(db: AsyncSession) -> set[str]:
+    result = await db.execute(select(Tender.reference_number))
+    return set(result.scalars().all())
+
+
+async def count_tenders(db: AsyncSession) -> int:
+    result = await db.execute(select(func.count(Tender.id)))
+    return result.scalar_one()
+
+
 def get_unmatched_tenders_sync(db: Session) -> List[Tender]:
     return db.execute(
         select(Tender).where(Tender.is_relevant.is_(None))

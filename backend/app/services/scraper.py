@@ -260,6 +260,56 @@ class EtimadScraper:
             scraped_at=datetime.now(timezone.utc),
         )
 
+    async def scrape_incremental(self, known_refs: set[str], on_tender_scraped=None) -> list[TenderCreate]:
+        """Scrape only new tenders. Stops when a full page has no new tenders."""
+        results: list[TenderCreate] = []
+
+        async with self:
+            list_page = await self._new_page()
+            try:
+                total_pages = await self._get_total_pages(list_page)
+            except Exception as e:
+                logger.error("failed_to_get_total_pages", error=str(e))
+                total_pages = 10  # check up to 10 pages as safety limit
+
+            for page_num in range(1, total_pages + 1):
+                logger.info("incremental_scraping_page", page=page_num, total=total_pages)
+                try:
+                    links = await self._get_tender_links_from_page(list_page, page_num)
+                except Exception as e:
+                    logger.error("page_scrape_failed", page=page_num, error=str(e))
+                    break
+
+                if not links:
+                    break
+
+                detail_page = await self._new_page()
+                page_new_count = 0
+                try:
+                    for link in links:
+                        try:
+                            tender = await self._scrape_tender_details(detail_page, link)
+                            if tender:
+                                if tender.reference_number not in known_refs:
+                                    results.append(tender)
+                                    known_refs.add(tender.reference_number)
+                                    page_new_count += 1
+                                    if on_tender_scraped:
+                                        await on_tender_scraped(tender)
+                        except Exception as e:
+                            logger.error("tender_scrape_failed", url=link, error=str(e))
+                finally:
+                    await detail_page.close()
+
+                if page_new_count == 0:
+                    logger.info("incremental_caught_up", stopped_at_page=page_num)
+                    break
+
+            await list_page.close()
+
+        logger.info("incremental_scrape_done", new_tenders=len(results))
+        return results
+
     async def scrape_all(self, on_tender_scraped=None) -> list[TenderCreate]:
         results: list[TenderCreate] = []
 
